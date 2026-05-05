@@ -75,17 +75,77 @@ const s = {
   },
 };
 
+// ✅ rows தவிர மற்றதை save பண்ணு
+const serializeMessages = (msgs) =>
+  msgs.slice(-50).map((m) => ({
+    ...m,
+    rows: [],
+    columns: m.columns || [],
+  }));
+
+// ✅ messages → AI history format
+const buildHistory = (messages) =>
+  messages
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(-10)
+    .map((m) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content:
+        m.role === "user"
+          ? m.text
+          : [m.explanation, m.sql].filter(Boolean).join(" | "),
+    }))
+    .filter((m) => m.content?.trim());
+
 export default function ChatPage({ activeConnId }) {
-  const [messages, setMessages] = useState([]);
+  const storageKey = `chat_history_${activeConnId}`;
+
+  const [messages, setMessages] = useState(() => {
+    if (!activeConnId) return [];
+    try {
+      const saved = localStorage.getItem(`chat_history_${activeConnId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef();
+  // ✅ latest messages ref - send() closure issue fix
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const isDisabled = !activeConnId || loading;
+
+  // ✅ Connection மாறும்போது history load
+  useEffect(() => {
+    if (!activeConnId) return;
+    try {
+      const saved = localStorage.getItem(`chat_history_${activeConnId}`);
+      setMessages(saved ? JSON.parse(saved) : []);
+    } catch {
+      setMessages([]);
+    }
+  }, [activeConnId]);
+
+  // ✅ messages மாறும்போது localStorage save
+  useEffect(() => {
+    if (!activeConnId || messages.length === 0) return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(serializeMessages(messages)));
+    } catch {}
+  }, [messages, storageKey]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const clearHistory = () => {
+    localStorage.removeItem(storageKey);
+    setMessages([]);
+  };
 
   const send = async (text, confirm = false) => {
     const prompt = (text || input).trim();
@@ -96,12 +156,14 @@ export default function ChatPage({ activeConnId }) {
       setMessages((p) => [...p, { role: "user", text: prompt }]);
     }
 
+    // ✅ Current messages-இருந்து history build பண்ணு
+    const history = buildHistory(messagesRef.current);
+
     setLoading(true);
     try {
-      const data = await askAI(prompt, [], confirm);
+      const data = await askAI(prompt, history, confirm);
 
-      // ✅ KEY FIX: If AI returned a SELECT sql but no rows, it means backend didn't execute it.
-      // Re-send the exact SQL as prompt so backend executes and returns rows.
+      // ✅ SELECT sql வந்து rows இல்லன்னா re-execute
       if (
         data.type === "select" &&
         data.sql &&
@@ -109,10 +171,8 @@ export default function ChatPage({ activeConnId }) {
         !data.form_fields?.length &&
         !data.needs_confirmation
       ) {
-        // silently re-ask with the generated SQL directly
         try {
-          const retryData = await askAI(data.sql, [], false);
-          // Merge: keep explanation from first response, rows from retry
+          const retryData = await askAI(data.sql, history, false);
           setMessages((p) => [
             ...p,
             {
@@ -124,7 +184,6 @@ export default function ChatPage({ activeConnId }) {
             },
           ]);
         } catch {
-          // fallback: show original response even without rows
           setMessages((p) => [
             ...p,
             { role: "assistant", ...data, originalPrompt: prompt },
@@ -159,8 +218,7 @@ export default function ChatPage({ activeConnId }) {
     } catch (e) {
       let msg = e.message;
       if (e.response?.status === 403) {
-        msg =
-          "⚠️ Access Denied: This action requires Administrator privileges. Go to Settings and set your connection role to Admin.";
+        msg = "⚠️ Access Denied: This action requires Administrator privileges. Go to Settings and set your connection role to Admin.";
       } else if (e.response?.data?.detail) {
         msg = e.response.data.detail;
       }
@@ -181,36 +239,12 @@ export default function ChatPage({ activeConnId }) {
     <div style={s.root}>
       <div style={s.chatContent}>
         {messages.length === 0 ? (
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
-              alignItems: "center",
-              opacity: 0.8,
-            }}
-          >
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", opacity: 0.8 }}>
             <div style={{ fontSize: "64px", marginBottom: "24px" }}>✨</div>
-            <div
-              style={{
-                fontSize: "32px",
-                fontWeight: "800",
-                color: "#fff",
-                textAlign: "center",
-              }}
-            >
+            <div style={{ fontSize: "32px", fontWeight: "800", color: "#fff", textAlign: "center" }}>
               Hi, I'm your AI Data Assistant
             </div>
-            <div
-              style={{
-                fontSize: "16px",
-                color: "var(--text2)",
-                marginTop: "12px",
-                textAlign: "center",
-                maxWidth: "400px",
-              }}
-            >
+            <div style={{ fontSize: "16px", color: "var(--text2)", marginTop: "12px", textAlign: "center", maxWidth: "400px" }}>
               {activeConnId
                 ? "Ask me anything about your database in plain English."
                 : "Please select a database connection in the sidebar to begin."}
@@ -229,52 +263,22 @@ export default function ChatPage({ activeConnId }) {
 
                       {/* DYNAMIC FORM */}
                       {m.form_fields && m.form_fields.length > 0 && (
-                        <div
-                          style={{
-                            background: "rgba(255, 255, 255, 0.03)",
-                            padding: "20px",
-                            borderRadius: "20px",
-                            border: "1px solid var(--glass-border)",
-                            marginTop: "12px",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: "16px",
-                            }}
-                          >
+                        <div style={{
+                          background: "rgba(255, 255, 255, 0.03)", padding: "20px",
+                          borderRadius: "20px", border: "1px solid var(--glass-border)", marginTop: "12px",
+                        }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
                             {m.form_fields.map((field) => (
-                              <div
-                                key={field}
-                                style={{
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  gap: "6px",
-                                }}
-                              >
-                                <label
-                                  style={{
-                                    fontSize: "11px",
-                                    fontWeight: "700",
-                                    color: "var(--text3)",
-                                    textTransform: "uppercase",
-                                  }}
-                                >
+                              <div key={field} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                                <label style={{ fontSize: "11px", fontWeight: "700", color: "var(--text3)", textTransform: "uppercase" }}>
                                   {field}
                                 </label>
                                 <input
                                   className="form-input-dynamic"
                                   placeholder={`Enter ${field}...`}
                                   style={{
-                                    background: "rgba(255, 255, 255, 0.05)",
-                                    border: "1px solid var(--glass-border)",
-                                    padding: "10px 14px",
-                                    borderRadius: "12px",
-                                    color: "#fff",
-                                    fontSize: "14px",
-                                    outline: "none",
+                                    background: "rgba(255, 255, 255, 0.05)", border: "1px solid var(--glass-border)",
+                                    padding: "10px 14px", borderRadius: "12px", color: "#fff", fontSize: "14px", outline: "none",
                                   }}
                                   id={`field-${field}-${i}`}
                                 />
@@ -282,26 +286,15 @@ export default function ChatPage({ activeConnId }) {
                             ))}
                             <button
                               onClick={() => {
-                                const values = m.form_fields
-                                  .map((f) => {
-                                    const val = document.getElementById(
-                                      `field-${f}-${i}`,
-                                    ).value;
-                                    return `${f}="${val}"`;
-                                  })
-                                  .join(", ");
-                                send(
-                                  `Add new record to the ${m.table_hint || "correct"} table with these values: ${values}`,
-                                );
+                                const values = m.form_fields.map((f) => {
+                                  const val = document.getElementById(`field-${f}-${i}`).value;
+                                  return `${f}="${val}"`;
+                                }).join(", ");
+                                send(`Add new record to the ${m.table_hint || "correct"} table with these values: ${values}`);
                               }}
                               style={{
-                                background: "var(--accent)",
-                                color: "#fff",
-                                padding: "12px",
-                                borderRadius: "14px",
-                                fontWeight: "700",
-                                fontSize: "13px",
-                                marginTop: "8px",
+                                background: "var(--accent)", color: "#fff", padding: "12px",
+                                borderRadius: "14px", fontWeight: "700", fontSize: "13px", marginTop: "8px",
                               }}
                             >
                               SUBMIT DATA
@@ -312,64 +305,31 @@ export default function ChatPage({ activeConnId }) {
 
                       {/* SQL TAGS */}
                       {m.queries && m.queries.length > 0 ? (
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                          }}
-                        >
-                          {m.queries.map((q, j) => (
-                            <SqlTag key={j} sql={q} />
-                          ))}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          {m.queries.map((q, j) => <SqlTag key={j} sql={q} />)}
                         </div>
                       ) : (
                         m.sql && <SqlTag sql={m.sql} />
                       )}
 
-                      {/* ✅ DATA TABLE - rows இருந்தா show பண்ணு */}
-                      {m.rows && m.rows.length > 0 && (
+                      {/* DATA TABLE */}
+                      {m.type === "select" && (m.rows?.length > 0 || m.columns?.length > 0) && (
                         <div style={{ marginTop: 16 }}>
-                          <DataTable rows={m.rows} />
+                          <DataTable rows={m.rows || []} columns={m.columns} />
                         </div>
                       )}
 
-                      {m.type === "select" &&
-                        m.rows &&
-                        m.rows.length === 0 &&
-                        m.columns && (
-                          <div style={{ marginTop: 16 }}>
-                            <DataTable rows={[]} columns={m.columns} />
-                          </div>
-                        )}
-
                       {/* CONFIRMATION */}
                       {m.needs_confirmation && (
-                        <div
-                          style={{
-                            marginTop: "20px",
-                            borderTop: "1px solid var(--glass-border)",
-                            paddingTop: "16px",
-                          }}
-                        >
-                          <div
-                            style={{
-                              color: "var(--accent-pink)",
-                              fontSize: "13px",
-                              marginBottom: "12px",
-                            }}
-                          >
+                        <div style={{ marginTop: "20px", borderTop: "1px solid var(--glass-border)", paddingTop: "16px" }}>
+                          <div style={{ color: "var(--accent-pink)", fontSize: "13px", marginBottom: "12px" }}>
                             {m.message}
                           </div>
                           <button
                             onClick={() => send(m.originalPrompt, true)}
                             style={{
-                              background: "var(--accent)",
-                              color: "#fff",
-                              padding: "10px 24px",
-                              borderRadius: "50px",
-                              fontSize: "13px",
-                              fontWeight: "800",
+                              background: "var(--accent)", color: "#fff", padding: "10px 24px",
+                              borderRadius: "50px", fontSize: "13px", fontWeight: "800",
                               boxShadow: "0 4px 15px rgba(124, 77, 255, 0.3)",
                             }}
                           >
@@ -378,15 +338,9 @@ export default function ChatPage({ activeConnId }) {
                         </div>
                       )}
 
-                      {/* SUCCESS MESSAGE for mutations */}
+                      {/* SUCCESS MESSAGE */}
                       {m.message && !m.needs_confirmation && (
-                        <div
-                          style={{
-                            marginTop: "12px",
-                            color: "var(--accent-cyan)",
-                            fontSize: "13px",
-                          }}
-                        >
+                        <div style={{ marginTop: "12px", color: "var(--accent-cyan)", fontSize: "13px" }}>
                           {m.message}
                         </div>
                       )}
@@ -398,13 +352,7 @@ export default function ChatPage({ activeConnId }) {
               </div>
             ))}
             {loading && (
-              <div
-                style={{
-                  color: "var(--accent)",
-                  fontSize: "14px",
-                  animation: "pulse 1s infinite",
-                }}
-              >
+              <div style={{ color: "var(--accent)", fontSize: "14px", animation: "pulse 1s infinite" }}>
                 Thinking...
               </div>
             )}
@@ -414,13 +362,19 @@ export default function ChatPage({ activeConnId }) {
       </div>
 
       <div style={s.inputSection}>
+        {messages.length > 0 && (
+          <div style={{ textAlign: "right", marginBottom: "8px" }}>
+            <button
+              onClick={clearHistory}
+              style={{ fontSize: "11px", color: "var(--text3)", background: "none", border: "none", cursor: "pointer", padding: "4px 8px" }}
+            >
+              🗑 Clear History
+            </button>
+          </div>
+        )}
         <div style={s.capsuleInput}>
           <textarea
-            placeholder={
-              activeConnId
-                ? "Enter your goal/prompts here..........."
-                : "Select a connection first..."
-            }
+            placeholder={activeConnId ? "Enter your goal/prompts here..........." : "Select a connection first..."}
             style={s.textarea}
             value={input}
             onChange={(e) => setInput(e.target.value)}
