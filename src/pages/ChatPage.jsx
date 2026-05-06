@@ -75,7 +75,6 @@ const s = {
   },
 };
 
-// ✅ rows தவிர மற்றதை save பண்ணு
 const serializeMessages = (msgs) =>
   msgs.slice(-50).map((m) => ({
     ...m,
@@ -83,7 +82,6 @@ const serializeMessages = (msgs) =>
     columns: m.columns || [],
   }));
 
-// ✅ messages → AI history format
 const buildHistory = (messages) =>
   messages
     .filter((m) => m.role === "user" || m.role === "assistant")
@@ -96,6 +94,15 @@ const buildHistory = (messages) =>
           : [m.explanation, m.sql].filter(Boolean).join(" | "),
     }))
     .filter((m) => m.content?.trim());
+
+// ✅ Extract table name from any SQL
+const extractTableName = (sql) => {
+  if (!sql) return null;
+  const match = sql.match(
+    /(?:FROM|INTO|UPDATE|TABLE)\s+[`"]?(\w+)[`"]?/i
+  );
+  return match?.[1] || null;
+};
 
 export default function ChatPage({ activeConnId }) {
   const storageKey = `chat_history_${activeConnId}`;
@@ -113,13 +120,11 @@ export default function ChatPage({ activeConnId }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef();
-  // ✅ latest messages ref - send() closure issue fix
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const isDisabled = !activeConnId || loading;
 
-  // ✅ Connection மாறும்போது history load
   useEffect(() => {
     if (!activeConnId) return;
     try {
@@ -130,7 +135,6 @@ export default function ChatPage({ activeConnId }) {
     }
   }, [activeConnId]);
 
-  // ✅ messages மாறும்போது localStorage save
   useEffect(() => {
     if (!activeConnId || messages.length === 0) return;
     try {
@@ -147,6 +151,26 @@ export default function ChatPage({ activeConnId }) {
     setMessages([]);
   };
 
+  // ✅ NEW: Direct SQL refresh — bypasses AI entirely, no regex risk
+  const refreshTable = async (tableName) => {
+    const selectSql = `SELECT * FROM \`${tableName}\` LIMIT 100`;
+    try {
+      const history = buildHistory(messagesRef.current);
+      const data = await askAI(selectSql, history, false);
+      setMessages((p) => [
+        ...p,
+        {
+          role: "assistant",
+          ...data,
+          explanation: data.explanation || `Showing all records in \`${tableName}\`.`,
+          sql: selectSql,
+        },
+      ]);
+    } catch (e) {
+      console.error("Auto-refresh failed:", e);
+    }
+  };
+
   const send = async (text, confirm = false) => {
     const prompt = (text || input).trim();
     if (!prompt || loading) return;
@@ -156,14 +180,13 @@ export default function ChatPage({ activeConnId }) {
       setMessages((p) => [...p, { role: "user", text: prompt }]);
     }
 
-    // ✅ Current messages-இருந்து history build பண்ணு
     const history = buildHistory(messagesRef.current);
 
     setLoading(true);
     try {
       const data = await askAI(prompt, history, confirm);
 
-      // ✅ SELECT sql வந்து rows இல்லன்னா re-execute
+      // ✅ SELECT sql came but no rows → re-execute
       if (
         data.type === "select" &&
         data.sql &&
@@ -197,22 +220,24 @@ export default function ChatPage({ activeConnId }) {
         { role: "assistant", ...data, originalPrompt: prompt },
       ]);
 
-      // 🔥 AUTO-REFRESH after INSERT/UPDATE/DELETE
-      const justExecuted =
+      // ✅ FIXED AUTO-REFRESH: Use direct SQL select instead of text prompt
+      // This avoids hitting the show_tables_pattern regex shortcut
+      const shouldRefresh =
         data.type === "insert" ||
         data.type === "update" ||
+        data.type === "alter" ||
         (confirm && data.type === "delete");
 
-      if (justExecuted) {
+      if (shouldRefresh) {
         const sql =
           data.sql ||
           (data.queries && data.queries[data.queries.length - 1]) ||
           "";
-        const tableMatch = sql.match(/(?:FROM|INTO|UPDATE)\s+[`"]?(\w+)[`"]?/i);
-        if (tableMatch?.[1]) {
+        const tableName = extractTableName(sql);
+        if (tableName) {
           setTimeout(() => {
-            send(`show all records in ${tableMatch[1]} table`, false);
-          }, 1000);
+            refreshTable(tableName);
+          }, 800);
         }
       }
     } catch (e) {
@@ -312,10 +337,17 @@ export default function ChatPage({ activeConnId }) {
                         m.sql && <SqlTag sql={m.sql} />
                       )}
 
-                      {/* DATA TABLE */}
+                      {/* ✅ DATA TABLE - select type or alter returned select */}
                       {m.type === "select" && (m.rows?.length > 0 || m.columns?.length > 0) && (
                         <div style={{ marginTop: 16 }}>
                           <DataTable rows={m.rows || []} columns={m.columns} />
+                        </div>
+                      )}
+
+                      {/* ✅ SUCCESS MESSAGE - all types */}
+                      {m.message && !m.needs_confirmation && (
+                        <div style={{ marginTop: "12px", color: "var(--accent-cyan)", fontSize: "13px" }}>
+                          {m.message}
                         </div>
                       )}
 
@@ -335,13 +367,6 @@ export default function ChatPage({ activeConnId }) {
                           >
                             CONFIRM AND EXECUTE
                           </button>
-                        </div>
-                      )}
-
-                      {/* SUCCESS MESSAGE */}
-                      {m.message && !m.needs_confirmation && (
-                        <div style={{ marginTop: "12px", color: "var(--accent-cyan)", fontSize: "13px" }}>
-                          {m.message}
                         </div>
                       )}
                     </>
