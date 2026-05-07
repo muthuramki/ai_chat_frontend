@@ -133,6 +133,17 @@ const extractTableName = (sql) => {
   return match?.[1] || null;
 };
 
+/**
+ * Extract database name from a CREATE DATABASE / CREATE SCHEMA statement.
+ */
+const extractDbName = (sql) => {
+  if (!sql) return null;
+  const match = sql.match(
+    /CREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?/i
+  );
+  return match?.[1] || null;
+};
+
 // Types that should render a data table
 const TABLE_DISPLAY_TYPES = new Set(["select", "create_db", "drop_db"]);
 
@@ -182,7 +193,6 @@ export default function ChatPage({ activeConnId }) {
   // ── Persist messages to localStorage whenever they change ─────────────────
   useEffect(() => {
     if (!activeConnId) return;
-    // Don't persist if there's nothing to save
     if (messages.length === 0) {
       localStorage.removeItem(storageKey);
       return;
@@ -381,6 +391,46 @@ export default function ChatPage({ activeConnId }) {
                         <div style={{ marginBottom: 16 }}>{m.explanation}</div>
                       )}
 
+                      {/* ── CREATE DATABASE success card ── */}
+                      {m.type === "create_db" && (
+                        <div
+                          style={{
+                            background: "rgba(0, 200, 150, 0.07)",
+                            border: "1px solid rgba(0, 200, 150, 0.25)",
+                            borderRadius: "16px",
+                            padding: "20px 24px",
+                            marginTop: "8px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "14px",
+                          }}
+                        >
+                          <span style={{ fontSize: "32px" }}>🗄️</span>
+                          <div>
+                            <div
+                              style={{
+                                fontWeight: "700",
+                                fontSize: "15px",
+                                color: "#00e5a0",
+                                marginBottom: "4px",
+                              }}
+                            >
+                              Database / Schema Created
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "13px",
+                                color: "var(--text2)",
+                              }}
+                            >
+                              {extractDbName(m.sql)
+                                ? `"${extractDbName(m.sql)}" is ready to use.`
+                                : "New database is ready to use."}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       {/* DYNAMIC INSERT FORM */}
                       {m.form_fields?.length > 0 && (
                         <div
@@ -487,8 +537,9 @@ export default function ChatPage({ activeConnId }) {
                         m.sql && <SqlTag sql={m.sql} />
                       )}
 
-                      {/* DATA TABLE */}
+                      {/* DATA TABLE — only for select-type responses */}
                       {TABLE_DISPLAY_TYPES.has(m.type) &&
+                        m.type !== "create_db" &&
                         (m.rows?.length > 0 || m.columns?.length > 0) && (
                           <div style={{ marginTop: 16 }}>
                             <DataTable
